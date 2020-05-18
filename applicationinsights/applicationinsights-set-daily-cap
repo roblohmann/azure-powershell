@@ -1,0 +1,62 @@
+#Import-Module Az
+#Connect-AzAccount
+
+#the daily GB cap at which to take action - any resources beyond this will be capped to the $CAP_TO value
+$CAP_CUTOFF = 1 ## Free tier = 0.161 - 5GB/month
+#the daily limit to set for anything exceeding the $CAP_CUTOFF value, in GB
+$CAP_TO = 2
+
+#An array of resources to ignore. These resources will appear in the report, but no action will be taken
+$ignoreResources = @("Subscription.Resource Group.Resource")
+$do_not_check = ""; #GUID of subscription not to check.
+
+$subscriptions = Get-AzSubscription
+
+$actions = @()
+foreach($sub in $subscriptions) {
+    
+    if($sub.Id -match $do_not_check){
+        continue
+    }
+
+    $subscriptionName = $sub.Name
+    $sub | Set-AzContext
+    Write-Output "Getting AI-resource for " $subscriptionName
+
+    $appInsightResources = Get-AzApplicationInsights
+
+    $aiResources = @()
+    foreach($ai in $appInsightResources) {
+        $aiResources += Get-AzApplicationInsights -ResourceGroupName $ai.ResourceGroupName -Name $ai.Name -IncludeDailyCap
+    }
+    
+    Write-Output "AI Resources collected, checking.."
+
+    foreach($ai in $aiResources) {
+        $identifier = "$($subscriptionName).$($ai.ResourceGroupName).$($ai.Name)"
+
+        if($ai.Cap -gt $CAP_CUTOFF) {
+            if($ignoreResources -contains $identifier) {
+                $action = "Ignore"
+            } else {
+                $action = "Reduce to $CAP_TO"
+                Set-AzApplicationInsightsDailyCap -ResourceGroupName $ai.ResourceGroupName -Name $ai.Name -DailyCapGB $CAP_TO
+            }
+        } else {
+            $action = "Below $CAP_CUTOFF"
+        }
+        
+        $actions += [PSCustomObject]@{
+            Subscription = $subscriptionName
+            ResourceGroup = $ai.ResourceGroupName
+            ResourceName = $ai.Name
+            Cap = $ai.Cap
+            MonthlyCost = (($ai.Cap * 31) - 5) * 2.3
+            Action = $action
+        }
+    }
+
+    Write-Output "Building table completed for subscriber " $subscriptionName
+}
+
+$actions | Sort-Object -Property MonthlyCost -Descending | Format-Table
